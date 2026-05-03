@@ -6,6 +6,11 @@ const http = require('http');
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
+// Disable autoplay blocking so IPTV streams play immediately
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('disable-features', 'AutoplayIgnoreWebAudio');
+
+
 // Data storage path
 const userDataPath = app.getPath('userData');
 const dataFile = path.join(userDataPath, 'iptv-data.json');
