@@ -76,7 +76,6 @@ export default function Player({ channel, volume, onVolumeChange }) {
       video.addEventListener('error', () => onFatalError('Cannot load stream'), { once: true });
     }
     return destroyHls;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel?.url, channel?.id, retryKey]);
 
   const resetControlsTimer = useCallback(() => {
