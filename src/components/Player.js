@@ -170,7 +170,7 @@ export default function Player({ channel, volume, onVolumeChange }) {
       // Give it 8 more seconds after stall before declaring error
       clearTimeout(blackScreenTimer.current);
       blackScreenTimer.current = setTimeout(() => {
-        if (video.readyState < 2) setStatus('error'), setErrorMsg('Stream stalled — source may be offline');
+        if (video.readyState < 2) { setStatus('error'); setErrorMsg('Stream stalled — source may be offline'); }
       }, 8000);
     };
     const onPlaying = () => clearTimeout(blackScreenTimer.current);
