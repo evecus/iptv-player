@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -6,12 +6,13 @@ const http = require('http');
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
-// Disable autoplay blocking so IPTV streams play immediately
+// Disable autoplay blocking
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('disable-features', 'AutoplayIgnoreWebAudio');
+// Allow mixed HTTP content inside HTTPS context
+app.commandLine.appendSwitch('allow-running-insecure-content');
+app.commandLine.appendSwitch('disable-web-security');
 
-
-// Data storage path
 const userDataPath = app.getPath('userData');
 const dataFile = path.join(userDataPath, 'iptv-data.json');
 
@@ -28,19 +29,34 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false, // Allow loading local and mixed content streams
+      webSecurity: false,
+      allowRunningInsecureContent: true,
     },
     icon: path.join(__dirname, '../public/icon.ico'),
   });
 
+  // Strip CORS / restrictive headers from ALL responses so streams load freely
+  win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    const headers = { ...details.responseHeaders };
+    // Remove headers that block cross-origin media
+    delete headers['x-frame-options'];
+    delete headers['X-Frame-Options'];
+    delete headers['content-security-policy'];
+    delete headers['Content-Security-Policy'];
+    // Overwrite CORS to allow everything
+    headers['access-control-allow-origin'] = ['*'];
+    headers['access-control-allow-methods'] = ['GET, POST, OPTIONS, HEAD'];
+    headers['access-control-allow-headers'] = ['*'];
+    callback({ responseHeaders: headers });
+  });
+
   if (isDev) {
     win.loadURL('http://localhost:3000');
-    win.webContents.openDevTools();
+    // win.webContents.openDevTools();
   } else {
     win.loadFile(path.join(__dirname, '../build/index.html'));
   }
 
-  // Window control handlers
   ipcMain.on('window-minimize', () => win.minimize());
   ipcMain.on('window-maximize', () => {
     if (win.isMaximized()) win.unmaximize();
@@ -54,26 +70,18 @@ function createWindow() {
   return win;
 }
 
-// Read/write persistent data
 ipcMain.handle('data-read', () => {
   try {
-    if (fs.existsSync(dataFile)) {
-      return JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
-    }
+    if (fs.existsSync(dataFile)) return JSON.parse(fs.readFileSync(dataFile, 'utf-8'));
   } catch (e) {}
   return null;
 });
 
 ipcMain.handle('data-write', (_, data) => {
-  try {
-    fs.writeFileSync(dataFile, JSON.stringify(data, null, 2), 'utf-8');
-    return true;
-  } catch (e) {
-    return false;
-  }
+  try { fs.writeFileSync(dataFile, JSON.stringify(data, null, 2), 'utf-8'); return true; }
+  catch (e) { return false; }
 });
 
-// Open file dialog
 ipcMain.handle('open-file-dialog', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
@@ -90,11 +98,16 @@ ipcMain.handle('open-file-dialog', async () => {
   return null;
 });
 
-// Fetch URL content
 ipcMain.handle('fetch-url', async (_, url) => {
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith('https') ? https : http;
-    const req = protocol.get(url, { timeout: 15000 }, (res) => {
+    const options = { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } };
+    const req = protocol.get(url, options, (res) => {
+      // Follow redirects
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        ipcMain.emit('fetch-url', null, res.headers.location);
+        return;
+      }
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => resolve(data));

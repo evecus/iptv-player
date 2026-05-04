@@ -1,21 +1,38 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import Hls from 'hls.js';
+import flvjs from 'flv.js';
 import './Player.css';
+
+// Detect stream type from URL
+function detectStreamType(url) {
+  const u = url.toLowerCase().split('?')[0];
+  if (u.endsWith('.m3u8') || u.includes('.m3u8')) return 'hls';
+  if (u.endsWith('.flv') || u.includes('.flv')) return 'flv';
+  if (u.startsWith('rtmp://') || u.startsWith('rtmpe://')) return 'rtmp';
+  // Many IPTV streams are FLV over HTTP without extension — check path hints
+  if (u.includes('/live/') || u.includes('/stream') || u.includes('/flv')) return 'flv';
+  return 'hls'; // default: try HLS first
+}
 
 export default function Player({ channel, volume, onVolumeChange }) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
+  const flvRef = useRef(null);
+  const blackScreenTimer = useRef(null);
   const [status, setStatus] = useState('idle');
   const [errorMsg, setErrorMsg] = useState('');
   const [muted, setMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [retryKey, setRetryKey] = useState(0);
+  const [streamType, setStreamType] = useState('');
   const controlsTimer = useRef(null);
   const containerRef = useRef(null);
 
-  const destroyHls = useCallback(() => {
+  const destroyAll = useCallback(() => {
+    clearTimeout(blackScreenTimer.current);
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    if (flvRef.current) { try { flvRef.current.pause(); flvRef.current.unload(); flvRef.current.detachMediaElement(); flvRef.current.destroy(); } catch(e){} flvRef.current = null; }
   }, []);
 
   useEffect(() => {
@@ -28,56 +45,141 @@ export default function Player({ channel, volume, onVolumeChange }) {
 
   useEffect(() => {
     if (!channel?.url) {
-      setStatus('idle'); destroyHls();
+      setStatus('idle'); destroyAll();
       if (videoRef.current) videoRef.current.src = '';
       return;
     }
-    setStatus('loading'); setErrorMsg(''); destroyHls();
+
+    setStatus('loading'); setErrorMsg(''); destroyAll();
     const video = videoRef.current;
     const url = channel.url;
+    const type = detectStreamType(url);
+    setStreamType(type);
 
-    const tryPlay = () => {
+    const onFatal = (msg) => {
+      clearTimeout(blackScreenTimer.current);
+      setStatus('error');
+      setErrorMsg(msg || 'Stream unavailable');
+    };
+
+    // Black-screen watchdog: if video doesn't produce frames within 12s, try flv fallback or error
+    const startBlackScreenWatchdog = (fallbackType) => {
+      clearTimeout(blackScreenTimer.current);
+      blackScreenTimer.current = setTimeout(() => {
+        // Check if video actually has data
+        if (video.readyState < 2 || video.videoWidth === 0) {
+          if (fallbackType === 'try-flv') {
+            // HLS loaded but no picture — retry as FLV
+            tryFlv(url, onFatal);
+          } else {
+            onFatal('Stream loaded but no video — source may be offline or unsupported format');
+          }
+        }
+      }, 12000);
+    };
+
+    const tryPlay = (fallback) => {
       const p = video.play();
       if (p !== undefined) {
-        p.then(() => setStatus('playing')).catch((err) => {
+        p.then(() => {
+          setStatus('playing');
+          startBlackScreenWatchdog(fallback);
+        }).catch((err) => {
           if (err.name === 'NotAllowedError') {
             video.muted = true;
             video.play()
-              .then(() => { setMuted(true); setStatus('playing'); })
-              .catch(() => setStatus('playing'));
+              .then(() => { setMuted(true); setStatus('playing'); startBlackScreenWatchdog(fallback); })
+              .catch(() => { setStatus('playing'); startBlackScreenWatchdog(fallback); });
           } else {
             setStatus('playing');
+            startBlackScreenWatchdog(fallback);
           }
         });
       } else {
         setStatus('playing');
+        startBlackScreenWatchdog(fallback);
       }
     };
 
-    const onFatalError = (msg) => { setStatus('error'); setErrorMsg(msg || 'Stream unavailable'); };
+    const tryFlv = (src, errCb) => {
+      destroyAll();
+      if (!flvjs.isSupported()) { errCb('FLV not supported'); return; }
+      try {
+        const flv = flvjs.createPlayer(
+          { type: 'flv', url: src, isLive: true, hasAudio: true, hasVideo: true },
+          {
+            enableWorker: false,
+            enableStashBuffer: false,
+            stashInitialSize: 128,
+            lazyLoad: false,
+            lazyLoadMaxDuration: 0,
+          }
+        );
+        flvRef.current = flv;
+        flv.attachMediaElement(video);
+        flv.load();
+        flv.on(flvjs.Events.ERROR, (errType, errDetail) => {
+          errCb('FLV error: ' + errDetail?.code);
+        });
+        tryPlay('none');
+      } catch (e) {
+        errCb('FLV init failed: ' + e.message);
+      }
+    };
 
-    if (isHlsUrl(url)) {
+    if (type === 'flv') {
+      tryFlv(url, onFatal);
+    } else {
+      // Try HLS first, watchdog will switch to FLV if black screen
       if (Hls.isSupported()) {
-        const hls = new Hls({ enableWorker: false, lowLatencyMode: true, backBufferLength: 30 });
+        const hls = new Hls({
+          enableWorker: false,
+          lowLatencyMode: true,
+          backBufferLength: 30,
+          manifestLoadingTimeOut: 10000,
+          manifestLoadingMaxRetry: 2,
+        });
         hlsRef.current = hls;
         hls.loadSource(url);
         hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, tryPlay);
-        hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) onFatalError('Stream error: ' + data.details); });
+        hls.on(Hls.Events.MANIFEST_PARSED, () => tryPlay('try-flv'));
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (data.fatal) {
+            // HLS failed completely — try FLV
+            destroyAll();
+            tryFlv(url, onFatal);
+          }
+        });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = url;
-        video.addEventListener('loadedmetadata', tryPlay, { once: true });
+        video.addEventListener('loadedmetadata', () => tryPlay('none'), { once: true });
+        video.addEventListener('error', () => onFatal('Cannot load stream'), { once: true });
       } else {
-        onFatalError('HLS not supported');
+        onFatal('No supported player found');
       }
-    } else {
-      video.src = url;
-      video.addEventListener('loadedmetadata', tryPlay, { once: true });
-      video.addEventListener('error', () => onFatalError('Cannot load stream'), { once: true });
     }
-    return destroyHls;
+
+    return destroyAll;
   }, [channel?.url, channel?.id, retryKey]);
 
+  // Also watch for stalled / empty video after initially playing
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const onStalled = () => {
+      // Give it 8 more seconds after stall before declaring error
+      clearTimeout(blackScreenTimer.current);
+      blackScreenTimer.current = setTimeout(() => {
+        if (video.readyState < 2) setStatus('error'), setErrorMsg('Stream stalled — source may be offline');
+      }, 8000);
+    };
+    const onPlaying = () => clearTimeout(blackScreenTimer.current);
+    video.addEventListener('stalled', onStalled);
+    video.addEventListener('playing', onPlaying);
+    return () => { video.removeEventListener('stalled', onStalled); video.removeEventListener('playing', onPlaying); };
+  }, []);
+
+  // Auto-hide controls
   const resetControlsTimer = useCallback(() => {
     setShowControls(true);
     clearTimeout(controlsTimer.current);
@@ -98,12 +200,12 @@ export default function Player({ channel, volume, onVolumeChange }) {
   }, []);
 
   const handleFullscreen = () => {
-    if (!document.fullscreenElement) { containerRef.current?.requestFullscreen(); }
-    else { document.exitFullscreen(); }
+    if (!document.fullscreenElement) containerRef.current?.requestFullscreen();
+    else document.exitFullscreen();
   };
 
   const handleRetry = () => {
-    setStatus('loading'); setErrorMsg(''); destroyHls();
+    setStatus('loading'); setErrorMsg(''); destroyAll();
     if (videoRef.current) videoRef.current.src = '';
     setRetryKey((k) => k + 1);
   };
@@ -164,6 +266,7 @@ export default function Player({ channel, volume, onVolumeChange }) {
             <div className="now-playing-dot" />
             <span className="now-playing-name ellipsis">{channel.name}</span>
             <span className="now-playing-group">{channel.group || ''}</span>
+            {streamType && <span className="stream-type-badge">{streamType.toUpperCase()}</span>}
           </div>
           <div className="controls-right">
             <button className="ctrl-btn" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute' : 'Mute'}>
@@ -187,8 +290,4 @@ export default function Player({ channel, volume, onVolumeChange }) {
       )}
     </div>
   );
-}
-
-function isHlsUrl(url) {
-  return /\.m3u8/i.test(url) || /\.(m3u8|ts)(\?|$)/i.test(url) || url.includes('/hls/') || url.includes('/live/');
 }

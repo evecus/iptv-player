@@ -195,3 +195,15 @@
   animation: fadeIn 0.25s ease;
 }
 .muted-banner:hover { background: rgba(232,101,26,0.85); }
+
+.stream-type-badge {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  background: rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.7);
+  padding: 2px 7px;
+  border-radius: 99px;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
