@@ -173,3 +173,25 @@
   box-shadow: 0 1px 4px rgba(0,0,0,0.3);
 }
 .volume-slider:focus { box-shadow: none; }
+
+/* Muted autoplay banner */
+.muted-banner {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.72);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 18px;
+  border-radius: 99px;
+  cursor: pointer;
+  z-index: 10;
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255,255,255,0.15);
+  transition: background 0.15s;
+  white-space: nowrap;
+  animation: fadeIn 0.25s ease;
+}
+.muted-banner:hover { background: rgba(232,101,26,0.85); }
