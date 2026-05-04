@@ -62,20 +62,23 @@ export default function Player({ channel, volume, onVolumeChange }) {
       setErrorMsg(msg || 'Stream unavailable');
     };
 
-    // Black-screen watchdog: if video doesn't produce frames within 12s, try flv fallback or error
+    // Watchdog: if currentTime hasn't moved after 20s, the stream is truly broken
     const startBlackScreenWatchdog = (fallbackType) => {
       clearTimeout(blackScreenTimer.current);
+      const checkAt = Date.now();
       blackScreenTimer.current = setTimeout(() => {
-        // Check if video actually has data
-        if (video.readyState < 2 || video.videoWidth === 0) {
+        // readyState < 2 means no data at all; currentTime === 0 means nothing decoded
+        const noData = video.readyState < 2;
+        const frozen = video.currentTime === 0 && !video.paused;
+        if (noData || frozen) {
           if (fallbackType === 'try-flv') {
-            // HLS loaded but no picture — retry as FLV
             tryFlv(url, onFatal);
           } else {
-            onFatal('Stream loaded but no video — source may be offline or unsupported format');
+            onFatal('Stream unavailable — source may be offline');
           }
         }
-      }, 12000);
+        // else: stream is playing fine, do nothing
+      }, 20000);
     };
 
     const tryPlay = (fallback) => {
@@ -167,11 +170,14 @@ export default function Player({ channel, volume, onVolumeChange }) {
     const video = videoRef.current;
     if (!video) return;
     const onStalled = () => {
-      // Give it 8 more seconds after stall before declaring error
+      // Only error out if still stalled after 15s AND currentTime hasn't moved
       clearTimeout(blackScreenTimer.current);
+      const timeAtStall = video.currentTime;
       blackScreenTimer.current = setTimeout(() => {
-        if (video.readyState < 2) { setStatus('error'); setErrorMsg('Stream stalled — source may be offline'); }
-      }, 8000);
+        if (video.currentTime === timeAtStall && video.readyState < 3) {
+          setStatus('error'); setErrorMsg('Stream stalled — source may be offline');
+        }
+      }, 15000);
     };
     const onPlaying = () => clearTimeout(blackScreenTimer.current);
     video.addEventListener('stalled', onStalled);
